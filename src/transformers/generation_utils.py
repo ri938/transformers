@@ -1172,7 +1172,7 @@ class GenerationMixin:
         elif is_sample_gen_mode:
             # 10. prepare logits warper
             logits_warper = self._get_logits_warper(
-                top_k=top_k, top_p=top_p, temperature=temperature, num_beams=num_beams, order=order
+                top_k=top_k, top_p=top_p, tfs=tfs, temperature=temperature, num_beams=num_beams, order=order
             )
 
             # 11. expand input_ids with `num_return_sequences` additional sequences per batch
