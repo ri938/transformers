@@ -632,7 +632,7 @@ class GenerationMixin:
         else:
             warpers.append(None)
 
-        if tfs is not None and tfs < 1.0:
+        if tfs is not None and tfs <= 1.0:
             warpers.append(TailFreeSamplingLogitsWarper(threshold=tfs))
         else:
             warpers.append(None)
