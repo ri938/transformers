@@ -39,6 +39,8 @@ from .generation_logits_process import (
     TemperatureLogitsWarper,
     TopKLogitsWarper,
     TopPLogitsWarper,
+    LogitBiasProcessor,
+    TailFreeSamplingLogitsWarper,
 )
 from .generation_stopping_criteria import (
     MaxLengthCriteria,
@@ -598,7 +600,7 @@ class GenerationMixin:
         )
 
     def _get_logits_warper(
-        self, top_k: int = None, top_p: float = None, temperature: float = None, num_beams: int = None
+        self, top_k: int = None, top_p: float = None, tfs: float = None, temperature: float = None, num_beams: int = None, order: Tuple[int, int, int, int] = None
     ) -> LogitsProcessorList:
         """
         This class returns a [`LogitsProcessorList`] list object that contains all relevant
@@ -608,23 +610,56 @@ class GenerationMixin:
         # init warp parameters
         top_k = top_k if top_k is not None else self.config.top_k
         top_p = top_p if top_p is not None else self.config.top_p
+        tfs = tfs
         temperature = temperature if temperature is not None else self.config.temperature
         # instantiate warpers list
-        warpers = LogitsProcessorList()
+        warpers = []
 
         # the following idea is largely copied from this PR: https://github.com/huggingface/transformers/pull/5420/files
         # all samplers can be found in `generation_utils_samplers.py`
         if temperature is not None and temperature != 1.0:
             warpers.append(TemperatureLogitsWarper(temperature))
+        else:
+            warpers.append(None)
+
         if top_k is not None and top_k != 0:
             warpers.append(TopKLogitsWarper(top_k=top_k, min_tokens_to_keep=(2 if num_beams > 1 else 1)))
+        else:
+            warpers.append(None)
+
         if top_p is not None and top_p < 1.0:
             warpers.append(TopPLogitsWarper(top_p=top_p, min_tokens_to_keep=(2 if num_beams > 1 else 1)))
-        return warpers
+        else:
+            warpers.append(None)
+
+        if tfs is not None and tfs < 1.0:
+            warpers.append(TailFreeSamplingLogitsWarper(threshold=tfs))
+        else:
+            warpers.append(None)
+
+        if order is not None and len(order) == 4 and all([x in order for x in (0,1,2,3)]):
+            reordered = []
+            for i in order:
+                reordered.append(warpers[i])
+            warpers = reordered
+
+        warpers = list(filter(lambda x: x is not None, warpers))
+
+        lpl = LogitsProcessorList()
+        for warper in warpers:
+            lpl.append(warper)
+
+        return lpl
 
     def _get_logits_processor(
         self,
         repetition_penalty: float,
+        repetition_penalty_range: int,
+        repetition_penalty_slope: float,
+        repetition_penalty_frequency: float,
+        repetition_penalty_presence: float,
+        repetition_penalty_whitelist: List[int],
+        logit_bias: List[Tuple[int, float]],
         no_repeat_ngram_size: int,
         encoder_no_repeat_ngram_size: int,
         encoder_input_ids: torch.LongTensor,
@@ -680,8 +715,10 @@ class GenerationMixin:
                     diversity_penalty=diversity_penalty, num_beams=num_beams, num_beam_groups=num_beam_groups
                 )
             )
-        if repetition_penalty is not None and repetition_penalty != 1.0:
-            processors.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty))
+        if logit_bias is not None:
+            processors.append(LogitBiasProcessor(logit_bias))
+        if (repetition_penalty is not None and repetition_penalty > 1.0) or (repetition_penalty_frequency is not None and repetition_penalty_frequency > 0.0) or (repetition_penalty_presence is not None and repetition_penalty_presence > 0.0):
+            processors.append(RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty, m=repetition_penalty_slope, penalize_last=repetition_penalty_range, alpha_frequency=repetition_penalty_frequency, alpha_presence=repetition_penalty_presence, whitelist=repetition_penalty_whitelist))
         if no_repeat_ngram_size is not None and no_repeat_ngram_size > 0:
             processors.append(NoRepeatNGramLogitsProcessor(no_repeat_ngram_size))
         if encoder_no_repeat_ngram_size is not None and encoder_no_repeat_ngram_size > 0:
@@ -750,7 +787,15 @@ class GenerationMixin:
         temperature: Optional[float] = None,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
+        tfs: Optional[float] = None,
+        logit_bias: Optional[List[Tuple[int, float]]] = None,
+        order: Tuple[int, int, int, int] = None,
         repetition_penalty: Optional[float] = None,
+        repetition_penalty_range: Optional[int] = None,
+        repetition_penalty_slope: Optional[float] = 3.33,
+        repetition_penalty_frequency: Optional[float] = None,
+        repetition_penalty_presence: Optional[float] = None,
+        repetition_penalty_whitelist: List[int] = None,
         bad_words_ids: Optional[Iterable[int]] = None,
         bos_token_id: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -1076,9 +1121,15 @@ class GenerationMixin:
         # 7. prepare distribution pre_processing samplers
         logits_processor = self._get_logits_processor(
             repetition_penalty=repetition_penalty,
+            repetition_penalty_range=repetition_penalty_range,
+            repetition_penalty_slope=repetition_penalty_slope,
+            repetition_penalty_frequency=repetition_penalty_frequency,
+            repetition_penalty_presence=repetition_penalty_presence,
+            repetition_penalty_whitelist=repetition_penalty_whitelist,
             no_repeat_ngram_size=no_repeat_ngram_size,
             encoder_no_repeat_ngram_size=encoder_no_repeat_ngram_size,
             encoder_input_ids=inputs_tensor,
+            logit_bias=logit_bias,
             bad_words_ids=bad_words_ids,
             min_length=min_length,
             max_length=max_length,
@@ -1121,7 +1172,7 @@ class GenerationMixin:
         elif is_sample_gen_mode:
             # 10. prepare logits warper
             logits_warper = self._get_logits_warper(
-                top_k=top_k, top_p=top_p, temperature=temperature, num_beams=num_beams
+                top_k=top_k, top_p=top_p, temperature=temperature, num_beams=num_beams, order=order
             )
 
             # 11. expand input_ids with `num_return_sequences` additional sequences per batch
@@ -1183,7 +1234,7 @@ class GenerationMixin:
         elif is_beam_sample_gen_mode:
             # 10. prepare logits warper
             logits_warper = self._get_logits_warper(
-                top_k=top_k, top_p=top_p, temperature=temperature, num_beams=num_beams
+                top_k=top_k, top_p=top_p, temperature=temperature, num_beams=num_beams, order=order
             )
 
             if stopping_criteria.max_length is None:
@@ -2672,6 +2723,7 @@ def top_k_top_p_filtering(
     logits: torch.FloatTensor,
     top_k: int = 0,
     top_p: float = 1.0,
+    tfs: float = 1.0,
     filter_value: float = -float("Inf"),
     min_tokens_to_keep: int = 1,
 ) -> torch.FloatTensor:
@@ -2697,5 +2749,8 @@ def top_k_top_p_filtering(
 
     if 0 <= top_p <= 1.0:
         logits = TopPLogitsWarper(top_p=top_p, min_tokens_to_keep=min_tokens_to_keep)(None, logits)
+
+    if 0 <= tfs <= 1.0:
+        logits = TailFreeSamplingLogitsWarper(threshold=tfs)(None, logits)
 
     return logits

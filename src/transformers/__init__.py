@@ -605,6 +605,7 @@ if is_torch_available():
         "TemperatureLogitsWarper",
         "TopKLogitsWarper",
         "TopPLogitsWarper",
+        "TailFreeSamplingLogitsWarper",
     ]
     _import_structure["generation_stopping_criteria"] = [
         "MaxLengthCriteria",
@@ -2585,6 +2586,7 @@ if TYPE_CHECKING:
             TemperatureLogitsWarper,
             TopKLogitsWarper,
             TopPLogitsWarper,
+            TailFreeSamplingLogitsWarper,
         )
         from .generation_stopping_criteria import (
             MaxLengthCriteria,
